@@ -52,7 +52,7 @@ Transform your Arch Linux gaming rig into the ultimate dual-purpose machine:
 sudo pacman -S hyprland sddm wofi gamescope steam
 
 # AUR packages (install with yay)
-yay -S gamescope-session-git uwsm-git
+yay -S gamescope-session-git uwsm-git gamescope-session-steam-git
 ```
 
 ### System Setup
