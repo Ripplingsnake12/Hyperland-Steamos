@@ -48,7 +48,7 @@ if command -v yay &> /dev/null; then AUR_HELPER="yay"; elif command -v paru &> /
     echo -e "${C_RED}Error: No AUR helper found (yay or paru). Please install one.${C_NC}"; exit 1; fi
 echo -e "${C_GREEN}Found AUR helper: ${AUR_HELPER}${C_NC}"
 sudo pacman -Syu --needed "${OFFICIAL_PACKAGES[@]}" --noconfirm
-$AUR_HELPER -S --needed "${AUR_PACKAGES[@]}" --noconfirm
+$AUR_HELPER -Sdd --needed "${AUR_PACKAGES[@]}" --noconfirm
 
 #=======================================================
 # STEP 2: CLEAN UP OLD CONFIGURATIONS
