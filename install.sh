@@ -38,7 +38,7 @@ SERVICE_OVERRIDE_DIR="/etc/systemd/user/gamescope-session-plus@.service.d"
 SERVICE_OVERRIDE_FILE="$SERVICE_OVERRIDE_DIR/override.conf"
 
 OFFICIAL_PACKAGES=( "hyprland" "wofi" "sddm" "uwsm" )
-AUR_PACKAGES=( "gamescope-git" "gamescope-session-git" "steam" "mangohud" "gamescope-session-steam-git")
+AUR_PACKAGES=( "gamescope-git" "gamescope-session-git" "steam" "gamescope-session-steam-git" "mangohud" )
 
 #=======================================================
 # STEP 1: DEPENDENCY INSTALLATION
@@ -47,7 +47,7 @@ echo -e "${C_BLUE}==> Installing Dependencies...${C_NC}"
 if command -v yay &> /dev/null; then AUR_HELPER="yay"; elif command -v paru &> /dev/null; then AUR_HELPER="paru"; else
     echo -e "${C_RED}Error: No AUR helper found (yay or paru). Please install one.${C_NC}"; exit 1; fi
 echo -e "${C_GREEN}Found AUR helper: ${AUR_HELPER}${C_NC}"
-sudo pacman -Syu --needed "${OFFICIAL_PACKAGES[@]}" --noconfirm
+sudo pacman -Syudd --needed "${OFFICIAL_PACKAGES[@]}" --noconfirm
 $AUR_HELPER -Sdd --needed "${AUR_PACKAGES[@]}" --noconfirm
 
 #=======================================================
@@ -110,18 +110,52 @@ rm -f "$HOME/.next-session"
 # Ensure environment is updated
 dbus-update-activation-environment --systemd DISPLAY WAYLAND_DISPLAY
 
-# Wait for Wayland socket if launching Hyprland
+# Enhanced Wayland socket waiting with better error handling
 wait_for_wayland() {
-    for _ in {1..30}; do
-        [ -e "$XDG_RUNTIME_DIR/wayland-1" ] && return
-        sleep 2
+    local socket_path="$XDG_RUNTIME_DIR/wayland-1"
+    local max_attempts=60
+    local attempt=1
+    
+    echo "Waiting for Wayland socket at $socket_path"
+    
+    while [ $attempt -le $max_attempts ]; do
+        if [ -e "$socket_path" ] && [ -S "$socket_path" ]; then
+            echo "Wayland socket ready after $attempt attempts"
+            return 0
+        fi
+        
+        # Log progress every 10 attempts
+        if [ $((attempt % 10)) -eq 0 ]; then
+            echo "Still waiting for Wayland socket... ($attempt/$max_attempts)"
+        fi
+        
+        sleep 0.5
+        ((attempt++))
     done
+    
+    echo "Warning: Wayland socket not found after $max_attempts attempts"
+    return 1
 }
 
 if [[ "$SESSION" == *"gamescope-session-steam"* ]]; then
+    echo "Starting Gamescope session..."
+    # Ensure gamescope dependencies are available
+    if ! command -v gamescope-session-plus &> /dev/null; then
+        echo "Error: gamescope-session-plus not found"
+        exit 1
+    fi
     exec gamescope-session-plus steam
 else
-    # Use hyprland-uwsm.desktop session
+    echo "Starting Hyprland session with UWSM..."
+    # Ensure uwsm is available
+    if ! command -v uwsm &> /dev/null; then
+        echo "Error: uwsm not found"
+        exit 1
+    fi
+    
+    # Wait for Wayland socket if needed
+    wait_for_wayland
+    
     exec uwsm start hyprland-uwsm.desktop
 fi
 EOS
@@ -237,33 +271,103 @@ choice=$(printf "🎮 SteamOS\n🖥️ Desktop" | wofi --dmenu \
 
 case "$choice" in
     "🖥️ Desktop")
-        echo "hyprland-uwsm.desktop" > "$HOME/.next-session"
-        notify-send "Session Switcher" "Switching to Desktop..." -t 2000
+        # Validate we can write the session file
+        if echo "hyprland-uwsm.desktop" > "$HOME/.next-session" 2>/dev/null; then
+            notify-send "Session Switcher" "Switching to Desktop..." -t 2000
+            echo "Session file written successfully"
+        else
+            notify-send "Session Switcher" "Error: Failed to write session file" -t 3000
+            echo "Error: Cannot write to $HOME/.next-session"
+            exit 1
+        fi
         ;;
     "🎮 SteamOS")
-        echo "gamescope-session-steam.desktop" > "$HOME/.next-session"
-        notify-send "Session Switcher" "Switching to SteamOS..." -t 2000
+        # Validate we can write the session file
+        if echo "gamescope-session-steam.desktop" > "$HOME/.next-session" 2>/dev/null; then
+            notify-send "Session Switcher" "Switching to SteamOS..." -t 2000
+            echo "Session file written successfully"
+        else
+            notify-send "Session Switcher" "Error: Failed to write session file" -t 3000
+            echo "Error: Cannot write to $HOME/.next-session"
+            exit 1
+        fi
         ;;
     *)
+        echo "No valid choice made"
         exit 1
         ;;
 esac
 
-# Clean shutdown of current session
-if pgrep -x "gamescope" > /dev/null; then
-    # We're in Gamescope, need to exit it properly
-    pkill -TERM gamescope
-    systemctl --user stop gamescope-session-plus@steam 2>/dev/null || true
-elif [ -n "$HYPRLAND_INSTANCE_SIGNATURE" ]; then
-    # We're in Hyprland, exit gracefully
-    hyprctl dispatch exit
-    sleep 2
-else
-    # Fallback - try to determine session and exit
-    pkill -u $USER Hyprland 2>/dev/null || true
-    pkill -u $USER gamescope 2>/dev/null || true
-    systemctl --user stop gamescope-session-plus@steam 2>/dev/null || true
-fi
+
+# Improved session cleanup with better reliability
+cleanup_session() {
+    local max_wait=10
+    local wait_count=0
+    
+    # Detect current session more reliably
+    if pgrep -x "gamescope" > /dev/null || pgrep -f "gamescope-session" > /dev/null; then
+        echo "Detected Gamescope session, shutting down..."
+        
+        # Try graceful shutdown first
+        systemctl --user stop gamescope-session-plus@steam 2>/dev/null || true
+        sleep 2
+        
+        # Force kill if still running
+        if pgrep -x "gamescope" > /dev/null; then
+            pkill -TERM gamescope
+            sleep 1
+            pkill -KILL gamescope 2>/dev/null || true
+        fi
+        
+        # Wait for processes to fully exit
+        while pgrep -x "gamescope" > /dev/null && [ $wait_count -lt $max_wait ]; do
+            sleep 1
+            ((wait_count++))
+        done
+        
+    elif [ -n "$HYPRLAND_INSTANCE_SIGNATURE" ] || pgrep -x "Hyprland" > /dev/null; then
+        echo "Detected Hyprland session, shutting down..."
+        
+        # Try hyprctl first if available
+        if command -v hyprctl &> /dev/null && [ -n "$HYPRLAND_INSTANCE_SIGNATURE" ]; then
+            hyprctl dispatch exit 2>/dev/null || true
+        else
+            # Fallback to pkill
+            pkill -TERM Hyprland 2>/dev/null || true
+        fi
+        
+        sleep 2
+        
+        # Force kill if still running
+        if pgrep -x "Hyprland" > /dev/null; then
+            pkill -KILL Hyprland 2>/dev/null || true
+        fi
+        
+        # Wait for processes to fully exit
+        while pgrep -x "Hyprland" > /dev/null && [ $wait_count -lt $max_wait ]; do
+            sleep 1
+            ((wait_count++))
+        done
+        
+    else
+        echo "No specific session detected, attempting general cleanup..."
+        # Fallback cleanup
+        pkill -u $USER Hyprland 2>/dev/null || true
+        pkill -u $USER gamescope 2>/dev/null || true
+        systemctl --user stop gamescope-session-plus@steam 2>/dev/null || true
+        sleep 2
+    fi
+    
+    # Clean up any remaining compositor processes
+    pkill -u $USER -f "gamescope-session" 2>/dev/null || true
+    pkill -u $USER -f "steam" 2>/dev/null || true
+    
+    # Give time for cleanup
+    sleep 1
+}
+
+# Execute cleanup
+cleanup_session
 EOSWITCH
 chmod +x "$SWITCH_SCRIPT_PATH"
 
